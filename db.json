@@ -1,0 +1,21 @@
+{
+  "users": [
+    {
+      "id": "u1",
+      "name": "Admin",
+      "username": "admin",
+      "password": "admin123",
+      "role": "admin"
+    },
+    {
+      "id": "u2",
+      "name": "Suhail",
+      "username": "suhail",
+      "password": "suhail123",
+      "role": "member"
+    }
+  ],
+  "transactions": [],
+  "session": null,
+  "theme": "light"
+}
