@@ -223,9 +223,12 @@ function login(){
 function startApp(){
   document.getElementById("loginScreen").classList.add("hidden");document.getElementById("app").classList.remove("hidden");document.getElementById("bottomNav").classList.remove("hidden");
   document.getElementById("greeting").textContent=`Welcome back, ${current().name}`;
-  renderAll()
+  renderAll();startSync()
 }
-function logout(){data.session=null;save();showLogin()}
+let syncInterval=null;
+function startSync(){syncInterval=setInterval(async()=>{if(!data.session)return;const sid=data.session;await load();data.session=sid;renderAll()},30000)}
+function stopSync(){clearInterval(syncInterval)}
+function logout(){data.session=null;save();stopSync();showLogin()}
 function toggleTheme(){data.theme=data.theme==="dark"?"light":"dark";document.documentElement.dataset.theme=data.theme==="dark"?"dark":"";save();renderReports()}
 function showView(v){
   document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));document.getElementById(v).classList.add("active");
