@@ -162,33 +162,69 @@ const today=()=>new Date().toISOString().slice(0,10);
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 
 async function save(){
-  const payload={...data,session:null}; // never persist session to cloud
+  const payload={...data,session:null};
+
+  // Always keep a local copy as an offline fallback.
   localStorage.setItem("familyLedger",JSON.stringify(data));
-  if(!JSONBIN_BIN_ID||JSONBIN_BIN_ID==="YOUR_BIN_ID")return;
+
+  if(!JSONBIN_BIN_ID || JSONBIN_BIN_ID==="YOUR_BIN_ID") return true;
+
   try{
-    await fetch(JSONBIN_URL,{method:"PUT",headers:{"Content-Type":"application/json","X-Master-Key":JSONBIN_API_KEY},body:JSON.stringify(payload)});
-  }catch(e){console.warn("Cloud save failed",e)}
+    const r=await fetch(JSONBIN_URL,{
+      method:"PUT",
+      headers:{
+        "Content-Type":"application/json",
+        "X-Master-Key":JSONBIN_API_KEY
+      },
+      body:JSON.stringify(payload)
+    });
+
+    if(!r.ok) throw new Error(`Cloud save failed: HTTP ${r.status}`);
+    return true;
+  }catch(e){
+    console.warn("Cloud save failed:",e);
+    return false;
+  }
 }
 
 async function load(){
-  data=JSON.parse(JSON.stringify(DEFAULTS));
-  // try cloud first
-  if(JSONBIN_BIN_ID&&JSONBIN_BIN_ID!=="YOUR_BIN_ID"){
+  const localRaw=localStorage.getItem("familyLedger");
+  let localData=null;
+
+  try{
+    const x=JSON.parse(localRaw||"null");
+    if(x&&Array.isArray(x.users)&&x.users.length>=2) localData=x;
+  }catch(e){}
+
+  // Prefer cloud because it is shared between devices.
+  if(JSONBIN_BIN_ID && JSONBIN_BIN_ID!=="YOUR_BIN_ID"){
     try{
-      const r=await fetch(JSONBIN_URL+"/latest",{headers:{"X-Master-Key":JSONBIN_API_KEY}});
+      const r=await fetch(JSONBIN_URL+"/latest",{
+        headers:{"X-Master-Key":JSONBIN_API_KEY}
+      });
+
       if(r.ok){
         const j=await r.json();
         const x=j.record;
-        if(x&&x.users&&x.users.length>=2){data=x;data.session=null;localStorage.setItem("familyLedger",JSON.stringify(data));return;}
+
+        if(x&&Array.isArray(x.users)&&x.users.length>=2){
+          const previousSession=data?.session||localData?.session||null;
+          data=x;
+          data.session=previousSession;
+          if(!data.transactions) data.transactions=[];
+          if(!data.theme) data.theme="light";
+          localStorage.setItem("familyLedger",JSON.stringify(data));
+          return;
+        }
       }
-    }catch(e){console.warn("Cloud load failed, using local",e)}
+    }catch(e){
+      console.warn("Cloud load failed, using local data:",e);
+    }
   }
-  // fallback to localStorage
-  try{
-    const x=JSON.parse(localStorage.getItem("familyLedger"));
-    if(x&&x.users&&x.users.length>=2)data=x;
-  }catch(e){}
+
+  data=localData || JSON.parse(JSON.stringify(DEFAULTS));
 }
+
 function current(){return data.users.find(u=>u.id===data.session)}
 function toast(s){const t=document.getElementById("toast");t.textContent=s;t.classList.add("show");setTimeout(()=>t.classList.remove("show"),1900)}
 function fmtDate(s){return new Date(s+"T00:00:00").toLocaleDateString("en-IN",{day:"2-digit",month:"short",year:"numeric"})}
@@ -199,7 +235,9 @@ function totals(list){
     out:list.filter(txOut).reduce((a,t)=>a+t.amount,0)}
 }
 function init(){
-  if(data.theme==="dark")document.documentElement.dataset.theme="dark";
+  if(data.theme==="dark") document.documentElement.dataset.theme="dark";
+  else document.documentElement.dataset.theme="";
+
   document.getElementById("loginForm").onsubmit=e=>{e.preventDefault();login()};
   document.getElementById("logoutBtn").onclick=logout;
   document.getElementById("themeBtn").onclick=toggleTheme;
@@ -211,90 +249,261 @@ function init(){
   document.getElementById("searchTx").oninput=renderTransactions;
   document.getElementById("filterTx").onchange=renderTransactions;
   document.getElementById("reportYear").onchange=renderReports;
-  if(data.session && current())startApp(); else showLogin();
+
+  if(data.session && current()) startApp();
+  else showLogin();
 }
-function showLogin(){document.getElementById("loginScreen").classList.remove("hidden");document.getElementById("app").classList.add("hidden");document.getElementById("bottomNav").classList.add("hidden")}
-function login(){
-  const u=document.getElementById("loginUser").value.trim(),p=document.getElementById("loginPass").value;
-  const user=data.users.find(x=>x.username.toLowerCase()===u.toLowerCase()&&x.password===p);
-  if(!user){toast("Invalid username or password");return}
-  data.session=user.id;save();startApp()
+
+function showLogin(){
+  document.getElementById("loginScreen").classList.remove("hidden");
+  document.getElementById("app").classList.add("hidden");
+  document.getElementById("bottomNav").classList.add("hidden");
 }
+
+async function login(){
+  const u=document.getElementById("loginUser").value.trim();
+  const p=document.getElementById("loginPass").value;
+
+  if(!u || !p){
+    toast("Enter username and password");
+    return;
+  }
+
+  // Refresh cloud data before checking credentials so a user created
+  // from another device can log in here.
+  await load();
+
+  const user=data.users.find(
+    x=>String(x.username||"").trim().toLowerCase()===u.toLowerCase() &&
+       String(x.password??"")===p
+  );
+
+  if(!user){
+    toast("Invalid username or password");
+    return;
+  }
+
+  data.session=user.id;
+  localStorage.setItem("familyLedger",JSON.stringify(data));
+  startApp();
+}
+
 function startApp(){
-  document.getElementById("loginScreen").classList.add("hidden");document.getElementById("app").classList.remove("hidden");document.getElementById("bottomNav").classList.remove("hidden");
+  document.getElementById("loginScreen").classList.add("hidden");
+  document.getElementById("app").classList.remove("hidden");
+  document.getElementById("bottomNav").classList.remove("hidden");
   document.getElementById("greeting").textContent=`Welcome back, ${current().name}`;
-  renderAll();startSync()
+  renderAll();
+  startSync();
 }
+
 let syncInterval=null;
-function startSync(){syncInterval=setInterval(async()=>{if(!data.session)return;const sid=data.session;await load();data.session=sid;renderAll()},30000)}
-function stopSync(){clearInterval(syncInterval)}
-function logout(){data.session=null;save();stopSync();showLogin()}
-function toggleTheme(){data.theme=data.theme==="dark"?"light":"dark";document.documentElement.dataset.theme=data.theme==="dark"?"dark":"";save();renderReports()}
-function showView(v){
-  document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));document.getElementById(v).classList.add("active");
-  document.querySelectorAll(".navitem").forEach(x=>x.classList.toggle("active",x.dataset.view===v));
-  if(v==="dashboard")renderDashboard(); if(v==="transactions")renderTransactions(); if(v==="reports")renderReports(); if(v==="family")renderFamily();
+function startSync(){
+  stopSync();
+  syncInterval=setInterval(async()=>{
+    if(!data.session)return;
+    const sid=data.session;
+    await load();
+    data.session=sid;
+    if(current()) renderAll();
+  },30000);
 }
-function renderAll(){renderDashboard();renderTransactions();renderReports();renderFamily()}
+
+function stopSync(){
+  if(syncInterval){
+    clearInterval(syncInterval);
+    syncInterval=null;
+  }
+}
+
+function logout(){
+  data.session=null;
+  localStorage.setItem("familyLedger",JSON.stringify(data));
+  stopSync();
+  showLogin();
+}
+
+function toggleTheme(){
+  data.theme=data.theme==="dark"?"light":"dark";
+  document.documentElement.dataset.theme=data.theme==="dark"?"dark":"";
+  save();
+  renderReports();
+}
+
+function showView(v){
+  document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));
+  document.getElementById(v).classList.add("active");
+  document.querySelectorAll(".navitem").forEach(x=>x.classList.toggle("active",x.dataset.view===v));
+  if(v==="dashboard")renderDashboard();
+  if(v==="transactions")renderTransactions();
+  if(v==="reports")renderReports();
+  if(v==="family")renderFamily();
+}
+
+function renderAll(){
+  renderDashboard();
+  renderTransactions();
+  renderReports();
+  renderFamily();
+}
+
 function renderDashboard(){
   const ts=totals(data.transactions), bal=ts.in-ts.out, now=new Date(), mk=now.toISOString().slice(0,7);
   const mt=totals(data.transactions.filter(t=>monthKey(t.date)===mk));
   document.getElementById("totalBalance").textContent=money(bal);
-  document.getElementById("heroIn").textContent=money(ts.in);document.getElementById("heroOut").textContent=money(ts.out);
-  document.getElementById("monthIn").textContent=money(mt.in);document.getElementById("monthOut").textContent=money(mt.out);
-  document.getElementById("txCount").textContent=data.transactions.length;document.getElementById("memberCount").textContent=data.users.length;
-  const recent=[...data.transactions].sort((a,b)=>b.date.localeCompare(a.date)||b.created-b.created).slice(0,8);
-  document.getElementById("recent").innerHTML=recent.length?recent.map(txHTML).join(""):`<div class="empty">No transactions yet.</div>`;
-  document.getElementById("miniMembers").innerHTML=data.users.map(u=>`<div class="member" style="margin-bottom:9px"><div class="avatar">${u.name[0].toUpperCase()}</div><div style="flex:1"><b>${esc(u.name)}</b><div class="muted" style="font-size:12px">@${esc(u.username)}</div></div><span class="pill">${u.role}</span></div>`).join("");
+  document.getElementById("heroIn").textContent=money(ts.in);
+  document.getElementById("heroOut").textContent=money(ts.out);
+  document.getElementById("monthIn").textContent=money(mt.in);
+  document.getElementById("monthOut").textContent=money(mt.out);
+  document.getElementById("txCount").textContent=data.transactions.length;
+  document.getElementById("memberCount").textContent=data.users.length;
+
+  const recent=[...data.transactions]
+    .sort((a,b)=>b.date.localeCompare(a.date)||b.created-a.created)
+    .slice(0,8);
+
+  document.getElementById("recent").innerHTML=recent.length
+    ? recent.map(txHTML).join("")
+    : `<div class="empty">No transactions yet.</div>`;
+
+  document.getElementById("miniMembers").innerHTML=data.users.map(u=>
+    `<div class="member" style="margin-bottom:9px">
+      <div class="avatar">${u.name[0].toUpperCase()}</div>
+      <div style="flex:1"><b>${esc(u.name)}</b><div class="muted" style="font-size:12px">@${esc(u.username)}</div></div>
+      <span class="pill">${u.role}</span>
+    </div>`
+  ).join("");
 }
+
 function txHTML(t){
   const u=data.users.find(x=>x.id===t.userId), to=data.users.find(x=>x.id===t.to);
-  return `<div class="tx"><div class="avatar">${(u?.name||"?")[0].toUpperCase()}</div><div class="txmain"><b>${esc(t.description||t.category||t.type)}</b><span>${esc(u?.name||"Unknown")} · ${fmtDate(t.date)}${to?` · → ${esc(to.name)}`:""}</span></div><div class="amount ${t.type==="income"?"in":"out"}">${t.type==="income"?"+":"−"}${money(t.amount)}</div></div>`
+  return `<div class="tx">
+    <div class="avatar">${(u?.name||"?")[0].toUpperCase()}</div>
+    <div class="txmain">
+      <b>${esc(t.description||t.category||t.type)}</b>
+      <span>${esc(u?.name||"Unknown")} · ${fmtDate(t.date)}${to?` · → ${esc(to.name)}`:""}</span>
+    </div>
+    <div class="amount ${t.type==="income"?"in":"out"}">${t.type==="income"?"+":"−"}${money(t.amount)}</div>
+  </div>`;
 }
+
 function renderTransactions(){
-  const q=(document.getElementById("searchTx")?.value||"").toLowerCase(), f=document.getElementById("filterTx")?.value||"all";
-  let list=[...data.transactions].sort((a,b)=>b.date.localeCompare(a.date)||b.created-a.created).filter(t=>{
-    const u=data.users.find(x=>x.id===t.userId), text=`${u?.name||""} ${t.description||""} ${t.category||""}`.toLowerCase();
-    return (f==="all"||t.type===f)&&(!q||text.includes(q))
-  });
+  const q=(document.getElementById("searchTx")?.value||"").toLowerCase();
+  const f=document.getElementById("filterTx")?.value||"all";
+
+  let list=[...data.transactions]
+    .sort((a,b)=>b.date.localeCompare(a.date)||b.created-a.created)
+    .filter(t=>{
+      const u=data.users.find(x=>x.id===t.userId);
+      const text=`${u?.name||""} ${t.description||""} ${t.category||""}`.toLowerCase();
+      return (f==="all"||t.type===f)&&(!q||text.includes(q));
+    });
+
   document.getElementById("txTable").innerHTML=list.length?list.map(t=>{
     const u=data.users.find(x=>x.id===t.userId),to=data.users.find(x=>x.id===t.to);
     const canAct=t.userId===data.session||current()?.role==="admin";
     const alreadyReversed=t.reversedBy||data.transactions.some(x=>x.reversesId===t.id);
-    const reverseBtn=t.type==="transfer"&&canAct&&!alreadyReversed?`<button class="btn light" style="margin-right:6px" onclick="reverseTx('${t.id}')">↩ Undo</button>`:""
-    const deleteBtn=canAct?`<button class="btn danger" onclick="deleteTx('${t.id}')">Delete</button>`:""
-    const tag=alreadyReversed?` <span style="font-size:10px;color:var(--muted)">(reversed)</span>`:""
-    return `<tr style="${alreadyReversed?'opacity:.5':''}"><td>${fmtDate(t.date)}</td><td>${esc(u?.name||"Unknown")}</td><td>${t.type}${tag}</td><td>${esc(t.description||t.category)}${to?` → ${esc(to.name)}`:""}</td><td class="${t.type==="income"?"green":"red"}">${t.type==="income"?"+":"−"}${money(t.amount)}</td><td style="white-space:nowrap">${reverseBtn}${deleteBtn}</td></tr>`
+    const reverseBtn=t.type==="transfer"&&canAct&&!alreadyReversed
+      ?`<button class="btn light" style="margin-right:6px" onclick="reverseTx('${t.id}')">↩ Undo</button>`:"";
+    const deleteBtn=canAct
+      ?`<button class="btn danger" onclick="deleteTx('${t.id}')">Delete</button>`:"";
+    const tag=alreadyReversed?` <span style="font-size:10px;color:var(--muted)">(reversed)</span>`:"";
+
+    return `<tr style="${alreadyReversed?'opacity:.5':''}">
+      <td>${fmtDate(t.date)}</td>
+      <td>${esc(u?.name||"Unknown")}</td>
+      <td>${t.type}${tag}</td>
+      <td>${esc(t.description||t.category)}${to?` → ${esc(to.name)}`:""}</td>
+      <td class="${t.type==="income"?"green":"red"}">${t.type==="income"?"+":"−"}${money(t.amount)}</td>
+      <td style="white-space:nowrap">${reverseBtn}${deleteBtn}</td>
+    </tr>`;
   }).join(""):`<tr><td colspan="6" class="empty">No matching transactions.</td></tr>`;
 }
-function openTx(type){openModal("txModal");document.getElementById("txType").value=type;document.getElementById("txDate").value=today();document.getElementById("txAmount").value="";document.getElementById("txDesc").value="";fillMembers();toggleTxFields();document.getElementById("txAmount").focus()}
-function fillMembers(){document.getElementById("txTo").innerHTML=data.users.filter(u=>u.id!==data.session).map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join("")}
-function toggleTxFields(){const type=document.getElementById("txType").value;document.getElementById("toBox").style.display=type==="transfer"?"block":"none";document.getElementById("categoryBox").style.display=type==="transfer"?"none":"block";document.getElementById("txTitle").textContent=type==="income"?"Add money":type==="expense"?"Add expense":"Transfer money"}
-function addTx(){
-  const type=document.getElementById("txType").value, amount=Number(document.getElementById("txAmount").value);
+
+function openTx(type){
+  openModal("txModal");
+  document.getElementById("txType").value=type;
+  document.getElementById("txDate").value=today();
+  document.getElementById("txAmount").value="";
+  document.getElementById("txDesc").value="";
+  fillMembers();
+  toggleTxFields();
+  document.getElementById("txAmount").focus();
+}
+
+function fillMembers(){
+  document.getElementById("txTo").innerHTML=data.users
+    .filter(u=>u.id!==data.session)
+    .map(u=>`<option value="${u.id}">${esc(u.name)}</option>`).join("");
+}
+
+function toggleTxFields(){
+  const type=document.getElementById("txType").value;
+  document.getElementById("toBox").style.display=type==="transfer"?"block":"none";
+  document.getElementById("categoryBox").style.display=type==="transfer"?"none":"block";
+  document.getElementById("txTitle").textContent=type==="income"?"Add money":type==="expense"?"Add expense":"Transfer money";
+}
+
+async function addTx(){
+  const type=document.getElementById("txType").value;
+  const amount=Number(document.getElementById("txAmount").value);
+
   if(!amount||amount<=0){toast("Enter a valid amount");return}
   if(type==="transfer"&&!document.getElementById("txTo").value){toast("Choose a family member");return}
-  data.transactions.push({id:uid(),userId:data.session,type,amount,category:document.getElementById("txCategory").value,description:document.getElementById("txDesc").value.trim(),date:document.getElementById("txDate").value,to:type==="transfer"?document.getElementById("txTo").value:null,created:Date.now()});
-  save();closeModal("txModal");renderAll();showUndo(data.transactions[data.transactions.length-1])
+
+  data.transactions.push({
+    id:uid(),
+    userId:data.session,
+    type,
+    amount,
+    category:document.getElementById("txCategory").value,
+    description:document.getElementById("txDesc").value.trim(),
+    date:document.getElementById("txDate").value,
+    to:type==="transfer"?document.getElementById("txTo").value:null,
+    created:Date.now()
+  });
+
+  await save();
+  closeModal("txModal");
+  renderAll();
+  showUndo(data.transactions[data.transactions.length-1]);
 }
+
 let lastTx=null,undoTimer=null;
+
 function reverseTx(id){
   const t=data.transactions.find(x=>x.id===id);
   if(!t||t.type!=="transfer")return;
   if(!confirm(`Reverse this transfer of ${money(t.amount)}? A counter-transfer will be created.`))return;
-  const rev={id:uid(),userId:t.to,type:"transfer",amount:t.amount,to:t.userId,description:`Reversal of: ${t.description||"transfer"}`,date:today(),reversesId:t.id,created:Date.now()};
+
+  const rev={
+    id:uid(),userId:t.to,type:"transfer",amount:t.amount,to:t.userId,
+    description:`Reversal of: ${t.description||"transfer"}`,
+    date:today(),reversesId:t.id,created:Date.now()
+  };
+
   t.reversedBy=rev.id;
   data.transactions.push(rev);
-  save();renderAll();toast("Transfer reversed")
+  save();
+  renderAll();
+  toast("Transfer reversed");
 }
 
+function deleteTx(id){
   const t=data.transactions.find(x=>x.id===id);
   if(!t)return;
-  const isOwner=t.userId===data.session, isAdmin=current()?.role==="admin";
+
+  const isOwner=t.userId===data.session;
+  const isAdmin=current()?.role==="admin";
   if(!isOwner&&!isAdmin){toast("You can only delete your own transactions");return}
   if(!confirm("Delete this transaction?"))return;
-  data.transactions=data.transactions.filter(x=>x.id!==id);save();renderAll();toast("Transaction deleted")
+
+  data.transactions=data.transactions.filter(x=>x.id!==id);
+  save();
+  renderAll();
+  toast("Transaction deleted");
 }
+
 function showUndo(tx){
   lastTx=tx;
   clearTimeout(undoTimer);
