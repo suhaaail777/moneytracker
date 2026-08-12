@@ -259,7 +259,12 @@ function renderTransactions(){
   });
   document.getElementById("txTable").innerHTML=list.length?list.map(t=>{
     const u=data.users.find(x=>x.id===t.userId),to=data.users.find(x=>x.id===t.to);
-    return `<tr><td>${fmtDate(t.date)}</td><td>${esc(u?.name||"Unknown")}</td><td>${t.type}</td><td>${esc(t.description||t.category)}${to?` → ${esc(to.name)}`:""}</td><td class="${t.type==="income"?"green":"red"}">${t.type==="income"?"+":"−"}${money(t.amount)}</td><td><button class="btn danger" onclick="deleteTx('${t.id}')">Delete</button></td></tr>`
+    const canAct=t.userId===data.session||current()?.role==="admin";
+    const alreadyReversed=t.reversedBy||data.transactions.some(x=>x.reversesId===t.id);
+    const reverseBtn=t.type==="transfer"&&canAct&&!alreadyReversed?`<button class="btn light" style="margin-right:6px" onclick="reverseTx('${t.id}')">↩ Undo</button>`:""
+    const deleteBtn=canAct?`<button class="btn danger" onclick="deleteTx('${t.id}')">Delete</button>`:""
+    const tag=alreadyReversed?` <span style="font-size:10px;color:var(--muted)">(reversed)</span>`:""
+    return `<tr style="${alreadyReversed?'opacity:.5':''}"><td>${fmtDate(t.date)}</td><td>${esc(u?.name||"Unknown")}</td><td>${t.type}${tag}</td><td>${esc(t.description||t.category)}${to?` → ${esc(to.name)}`:""}</td><td class="${t.type==="income"?"green":"red"}">${t.type==="income"?"+":"−"}${money(t.amount)}</td><td style="white-space:nowrap">${reverseBtn}${deleteBtn}</td></tr>`
   }).join(""):`<tr><td colspan="6" class="empty">No matching transactions.</td></tr>`;
 }
 function openTx(type){openModal("txModal");document.getElementById("txType").value=type;document.getElementById("txDate").value=today();document.getElementById("txAmount").value="";document.getElementById("txDesc").value="";fillMembers();toggleTxFields();document.getElementById("txAmount").focus()}
@@ -270,9 +275,41 @@ function addTx(){
   if(!amount||amount<=0){toast("Enter a valid amount");return}
   if(type==="transfer"&&!document.getElementById("txTo").value){toast("Choose a family member");return}
   data.transactions.push({id:uid(),userId:data.session,type,amount,category:document.getElementById("txCategory").value,description:document.getElementById("txDesc").value.trim(),date:document.getElementById("txDate").value,to:type==="transfer"?document.getElementById("txTo").value:null,created:Date.now()});
-  save();closeModal("txModal");renderAll();toast("Transaction saved")
+  save();closeModal("txModal");renderAll();showUndo(data.transactions[data.transactions.length-1])
 }
-function deleteTx(id){if(!confirm("Delete this transaction?"))return;data.transactions=data.transactions.filter(t=>t.id!==id);save();renderAll();toast("Transaction deleted")}
+let lastTx=null,undoTimer=null;
+function reverseTx(id){
+  const t=data.transactions.find(x=>x.id===id);
+  if(!t||t.type!=="transfer")return;
+  if(!confirm(`Reverse this transfer of ${money(t.amount)}? A counter-transfer will be created.`))return;
+  const rev={id:uid(),userId:t.to,type:"transfer",amount:t.amount,to:t.userId,description:`Reversal of: ${t.description||"transfer"}`,date:today(),reversesId:t.id,created:Date.now()};
+  t.reversedBy=rev.id;
+  data.transactions.push(rev);
+  save();renderAll();toast("Transfer reversed")
+}
+
+  const t=data.transactions.find(x=>x.id===id);
+  if(!t)return;
+  const isOwner=t.userId===data.session, isAdmin=current()?.role==="admin";
+  if(!isOwner&&!isAdmin){toast("You can only delete your own transactions");return}
+  if(!confirm("Delete this transaction?"))return;
+  data.transactions=data.transactions.filter(x=>x.id!==id);save();renderAll();toast("Transaction deleted")
+}
+function showUndo(tx){
+  lastTx=tx;
+  clearTimeout(undoTimer);
+  const t=document.getElementById("toast");
+  t.innerHTML=`Transaction saved &nbsp;<button onclick="undoTx()" style="background:rgba(255,255,255,.25);border:0;border-radius:8px;padding:3px 10px;color:#fff;font-weight:800;cursor:pointer">Undo</button>`;
+  t.classList.add("show");
+  undoTimer=setTimeout(()=>{t.classList.remove("show");lastTx=null},5000)
+}
+function undoTx(){
+  if(!lastTx)return;
+  data.transactions=data.transactions.filter(x=>x.id!==lastTx.id);
+  lastTx=null;clearTimeout(undoTimer);
+  document.getElementById("toast").classList.remove("show");
+  save();renderAll()
+}
 function renderReports(){
   try{
   const years=[...new Set(data.transactions.map(t=>t.date.slice(0,4)))].sort().reverse();if(!years.length)years.push(String(new Date().getFullYear()));
